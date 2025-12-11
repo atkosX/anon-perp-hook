@@ -1,185 +1,150 @@
-# Anon Perp Hook - Perpetual Futures Dark Pool
+# Anon Perp Hook
 
-A dark pool implementation for perpetual futures trading on Uniswap V4, featuring CoW (Coincidence of Wants) matching and MEV protection.
+Uniswap V4 hook for perpetual futures trading with dark pool matching. Orders are matched off-chain through an EigenLayer AVS operator network before settlement on-chain.
 
-## 🎯 Features
+## Features
 
-- **Perp-Only Trading**: Only perpetual futures, no spot trading
-- **CoW Matching**: Direct matching of long vs short orders (same pool)
-- **vAMM Integration**: Virtual AMM for pricing (main pool is no-op)
-- **Dark Pool**: Order hiding with ZK proofs for MEV protection
-- **EigenLayer AVS**: Decentralized operator network
-- **Margin Management**: Centralized USDC vault for collateral
-- **NFT Positions**: ERC721-based position representation
+- Perpetual futures only (no spot trading)
+- CoW matching for long/short orders in the same pool
+- vAMM pricing (main Uniswap pool is no-op)
+- Order hiding with ZK proofs for MEV protection
+- EigenLayer AVS for decentralized order processing
+- Centralized margin account (USDC collateral)
+- NFT-based position representation
 
-## 📁 Project Structure
+## Project Structure
 
 ```
-anon-perp-hook/
-├── contracts/src/          # Solidity contracts
-│   ├── PerpDarkPoolHook.sol
-│   ├── MarginAccount.sol
-│   ├── PositionManager.sol
-│   └── libraries/
-├── avs/src/               # EigenLayer AVS contracts
-│   ├── OrderServiceManager.sol
-│   └── ZkVerifyBridge.sol
-├── operator/              # TypeScript operator code
-│   ├── index.ts
-│   ├── matching.ts
-│   └── utils.ts
-├── scripts/               # Deployment & setup scripts
-├── abis/                  # Contract ABIs (generated)
-└── order-engine/          # SP1 ZK proof program
+contracts/src/          # Core contracts
+├── PerpDarkPoolHook.sol
+├── MarginAccount.sol
+├── PositionManager.sol
+├── PositionFactory.sol
+├── FundingOracle.sol
+└── MarketManager.sol
+
+avs/src/                # EigenLayer AVS contracts
+├── OrderServiceManager.sol
+└── ZkVerifyBridge.sol
+
+operator/               # Operator service (TypeScript)
+├── index.ts
+├── matching.ts
+└── zk-proof.ts
+
+order-engine/           # SP1 ZK proof program (Rust)
+└── program/src/lib.rs
 ```
 
-## 🚀 Quick Start
+## Setup
 
 ### Prerequisites
 
-- [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- Foundry
 - Node.js 18+
-- Rust (for SP1 proofs, optional)
+- Rust (for SP1 proof generation)
 
-### Setup
+### Installation
 
-1. **Clone and install dependencies:**
-   ```bash
-   git clone <repo-url>
-   cd anon-perp-hook
-   ./scripts/SetupDependencies.sh
-   ```
+```bash
+# Install dependencies
+./scripts/SetupDependencies.sh
 
-2. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
+# Configure environment
+cp env.example .env
+# Edit .env with your RPC URL and keys
 
-3. **Build contracts:**
-   ```bash
-   forge build
-   ```
+# Build contracts
+forge build
 
-4. **Generate ABIs:**
-   ```bash
-   ./scripts/GenerateABIs.sh
-   ```
+# Run tests
+forge test
+```
 
-5. **Run tests:**
-   ```bash
-   ./scripts/TestAll.sh
-   ```
+## Usage
 
-## 📖 Usage
+### Submitting Orders
 
-### Submit Perp Order with CoW Matching
+Orders are submitted via Uniswap V4's swap function with encoded hook data:
 
 ```solidity
-// Encode order data
+// CoW matching order
 bytes memory hookData = abi.encode(
     ORDER_TYPE_PERP_COW,  // 1
     abi.encode(
         sender,
-        isLong,           // true for long, false for short
-        marginAmount,     // USDC amount (6 decimals)
-        leverage,         // Basis points (e.g., 1000 = 10x)
-        maxSlippage,      // Basis points
+        isLong,           // true = long, false = short
+        marginAmount,     // USDC (6 decimals)
+        leverage,         // e.g., 2e18 = 2x
+        maxSlippage,      // basis points
         positionId        // 0 for new position
     )
 );
 
-// Call pool swap with hook data
 poolManager.swap(key, swapParams, hookData);
 ```
 
-### Submit Direct vAMM Order
+For direct vAMM execution (bypass dark pool), use `ORDER_TYPE_PERP_DIRECT` (2).
 
-```solidity
-bytes memory hookData = abi.encode(
-    ORDER_TYPE_PERP_DIRECT,  // 2
-    abi.encode(...)  // Same structure as above
-);
-```
-
-## 🏗️ Architecture
+## Architecture
 
 ### Order Flow
 
-```
-User → PerpDarkPoolHook → OrderServiceManager → Operator
-         ↓                      ↓                    ↓
-    [Lock Margin]        [Create Task]      [Find CoW Match]
-         ↓                      ↓                    ↓
-    [ERC6909 Lock]       [ZK Proof]         [Submit Settlement]
-         ↓                      ↓                    ↓
-    [Position Created]   [vAMM Sync]        [CoW Match Executed]
-```
+1. User submits order via `poolManager.swap()` with hook data
+2. `PerpDarkPoolHook` intercepts, locks margin, creates task in AVS
+3. Operator monitors tasks, batches them (10 blocks), finds CoW matches
+4. Operator generates ZK proof, submits settlement to AVS
+5. AVS verifies and calls hook to settle positions
+6. Positions created, vAMM reserves synced
 
 ### CoW Matching
 
-- Long orders are matched with short orders
-- Same pool, opposite direction
-- Match price calculated from vAMM + task prices
-- Positions created for both traders
-- vAMM reserves synchronized
+Long and short orders in the same pool are matched directly. Match price is the median of vAMM mark price and implied prices from both orders. Positions are created for both traders atomically.
 
 ### vAMM Fallback
 
-- Unmatched orders execute via vAMM
-- Virtual reserves updated
-- Position created directly
-- Main Uniswap pool remains no-op
+Unmatched orders execute directly through the vAMM. Virtual reserves are updated and the position is created immediately. The main Uniswap pool remains unused (no-op).
 
-## 🧪 Testing
+## Testing
 
 ```bash
-# Run all tests
+# All tests
 forge test
 
-# Run with verbose output
+# Verbose output
 forge test -vvv
 
-# Run specific test
-forge test --match-test testPerpOrderCreation
+# Specific test file
+forge test --match-path contracts/test/PerpDarkPoolHook.t.sol
+
+# Fork tests (requires MAINNET_RPC_URL in .env)
+forge test --match-path contracts/test/ForkTest.sol
 ```
 
-## 📦 Deployment
+## Deployment
 
-### 1. Deploy Core Contracts
+Deploy in order:
 
 ```bash
-forge script scripts/DeployCore.s.sol \
-  --rpc-url $RPC_URL \
-  --broadcast \
-  --verify
+# 1. Core contracts (MarginAccount, PositionManager, etc.)
+forge script scripts/DeployCore.s.sol --rpc-url $RPC_URL --broadcast
+
+# 2. Hook and AVS contracts
+forge script scripts/DeployHook.s.sol --rpc-url $RPC_URL --broadcast
+
+# 3. Initialize markets
+forge script scripts/InitializeMarket.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-### 2. Deploy Hook & AVS
+## Configuration
 
-```bash
-forge script scripts/DeployHook.s.sol \
-  --rpc-url $RPC_URL \
-  --broadcast \
-  --verify
-```
-
-### 3. Initialize Markets
-
-```bash
-forge script scripts/InitializeMarket.s.sol \
-  --rpc-url $RPC_URL \
-  --broadcast
-```
-
-## 🔧 Configuration
-
-### Environment Variables
+Required environment variables (see `env.example`):
 
 ```env
 RPC_URL=http://localhost:8545
 PRIVATE_KEY=your_private_key
 CHAIN_ID=31337
+MAINNET_RPC_URL=https://...  # For fork tests
 MARGIN_ACCOUNT=0x...
 POSITION_MANAGER=0x...
 FUNDING_ORACLE=0x...
@@ -187,45 +152,34 @@ PERP_DARK_POOL_HOOK=0x...
 ORDER_SERVICE_MANAGER=0x...
 ```
 
-### Operator Setup
+### Running the Operator
 
-1. Register operator in EigenLayer
-2. Configure operator environment
-3. Start operator service:
-   ```bash
-   npm run operator
-   ```
+The operator service monitors tasks, finds matches, and submits settlements:
 
-## 📚 Documentation
+```bash
+cd operator
+npm install
+npm run operator
+```
 
-- [Quick Start Guide](./QUICK_START.md)
-- [Implementation Status](./IMPLEMENTATION_STATUS.md)
-- [Build Summary](./BUILD_SUMMARY.md)
-- [Missing Components](./MISSING_COMPONENTS.md)
+The operator must be registered in EigenLayer first.
 
-## 🔒 Security
+## Security Considerations
 
-- Order hiding prevents front-running
-- ZK proofs validate order commitments
-- EigenLayer AVS provides decentralized validation
-- MarginAccount manages collateral securely
-- Positions are NFT-based for composability
+- Orders are hidden until batch processing (MEV protection)
+- ZK proofs validate order commitments without revealing details
+- Nullifier system prevents replay attacks
+- Operator signatures verified on-chain
+- Margin locked before order creation
 
-## 🤝 Contributing
+## Dependencies
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+- Uniswap V4 Core
+- EigenLayer Middleware
+- SP1 (ZK proof generation)
+- Chainlink (price feeds)
+- OpenZeppelin Contracts
 
-## 📄 License
+## License
 
 MIT
-
-## 🙏 Acknowledgments
-
-- Uniswap V4 for the hook architecture
-- EigenLayer for AVS infrastructure
-- SP1 for ZK proof generation
-- Pyth Network for price feeds
